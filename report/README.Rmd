@@ -1,0 +1,665 @@
+---
+title: "Marcel van der Heijden, botanical garden experiment"
+author: "Marc W Schmid"
+date: "21st of Mai 2019"
+bibliography: reportReferences.bib
+output:
+  html_document:
+    toc: true # table of content true
+    depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united # HTML theme
+    highlight: kate  # specifies the syntax highlighting style
+---
+
+[see this for indicator species analysis](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0148824)
+
+# Dependencies
+
+## Bash/Exec
+
+**See the pesticides project**
+
+## DBs
+
+**See the pesticides project**
+
+# Directories
+
+```{sh}
+BASEDIR="/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres"
+RAWDIR="$BASEDIR/GitIgnore_fastq"
+READS="$BASEDIR/GitIgnore_fastqProcessed"
+QUALS="$BASEDIR/GitIgnore_quals"
+USEARCHOUT_16S="$BASEDIR/GitIgnore_usearchOutput_16S"
+USEARCHOUT_ITS="$BASEDIR/GitIgnore_usearchOutput_ITS"
+UTAXDIR="/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_pesticides/GitIgnore_utaxdb"
+RESDIR_16S="$BASEDIR/GitIgnore_results_16S"
+RESDIR_ITS="$BASEDIR/GitIgnore_results_ITS"
+SCRIPTDIR="$BASEDIR/scripts"
+TEMPDIR="$HOME/tempRhizo"
+PROGS="/media/mwschmid/archiveNoBackup/Progs"
+ALLSAMPLESFILE_16S="$BASEDIR/report/16S_samples.txt"
+ALLSAMPLESFILE_ITS="$BASEDIR/report/ITS_samples.txt"
+ALLSAMPLES_16S=($(<"$ALLSAMPLESFILE_16S"))
+ALLSAMPLES_ITS=($(<"$ALLSAMPLESFILE_ITS"))
+```
+
+# Processing
+
+## Extract the primers
+
+Quite some manual work. 171030_PCR_primers.xlsx. All barcodes are unique. For ITS it's the same as for Florian, ITS1. For 16S it's V5-V7: _In this study, the primer pair 799F-1391R, which amplifies the V5-V7 hypervariable regions of the 16S rDNA gene, displayed very low amplification of non-target DNA across all sampled plant compartments. And retrieved the highest number of OTUs as well as exhibited the highest Inverse Simpson diversity, especially in the plant compartments with high chloroplast content (stem and leaf samples). Therefore, we propose primer pair 799F-1391R as best suited for 16S rDNA metabarcoding studies which simultaneously investigate rhizosphere and endosphere microbiomes. _ [Beckers et al. 2016](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4865482/)
+
+```{r}
+baseDir <- "/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/report"
+allPrimers <- read.table(file.path(baseDir, "allUsedPrimers.txt"), sep = '\t', header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+primers16S <- read.table(file.path(baseDir, "16S_primers.txt"), sep = '\t', header = TRUE, row.names = 1, stringsAsFactors = FALSE); rownames(primers16S) <- paste0("Sample16S", rownames(primers16S))
+primersITS <- read.table(file.path(baseDir, "ITS_primers.txt"), sep = '\t', header = TRUE, row.names = 1, stringsAsFactors = FALSE); rownames(primersITS) <- paste0("SampleITS", rownames(primersITS))
+allPrimers$paddingAndBarcode <- paste0(allPrimers$padding, allPrimers$barcode)
+
+forAxe16S <- cbind(allPrimers[primers16S$forward, "paddingAndBarcode"], allPrimers[primers16S$reverse, "paddingAndBarcode"], rownames(primers16S))
+forAxeITS <- cbind(allPrimers[primersITS$forward, "paddingAndBarcode"], allPrimers[primersITS$reverse, "paddingAndBarcode"], rownames(primersITS))
+colnames(forAxe16S) <- c("Barcode1", "Barcode2", "ID")
+colnames(forAxeITS) <- c("Barcode1", "Barcode2", "ID")
+forAxe <- rbind(forAxe16S, forAxeITS)
+
+nrow(forAxe) == length(unique(paste0(forAxe[,"Barcode1"], "_", forAxe[,"Barcode2"])))
+write.table(forAxe, file.path(baseDir, "forAxe.txt"), row.names = FALSE, quote = FALSE, sep = '\t')
+write.table(forAxe[grep("Nod", forAxe[,"ID"]),], file.path(baseDir, "forAxe_run7.txt"), row.names = FALSE, quote = FALSE, sep = '\t')
+forAxeReverse <- forAxe[, c("Barcode2", "Barcode1", "ID")]; colnames(forAxeReverse) <- c("Barcode1", "Barcode2", "ID")
+write.table(forAxeReverse, file.path(baseDir, "forAxeReverse.txt"), row.names = FALSE, quote = FALSE, sep = '\t')
+write.table(forAxeReverse[grep("Nod", forAxeReverse[,"ID"]),], file.path(baseDir, "forAxeReverse_run7.txt"), row.names = FALSE, quote = FALSE, sep = '\t')
+
+write.table(rownames(primers16S), file.path(baseDir, "16S_samples.txt"), row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(rownames(primersITS), file.path(baseDir, "ITS_samples.txt"), row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+## Check for demultiplexing
+
+```{sh}
+zcat $RAWDIR/p1617-3492-01_S1_L001_R1_001.fastq.gz | grep GGTAGAAGACGAG | head
+zcat $RAWDIR/p1617-3492-01_S1_L001_R2_001.fastq.gz | grep GGTAGCATGAGCA | head
+```
+
+## Demultiplex with Axe
+
+Don't know if adapters were ligated. Treat as if barcodes may be on both ends
+
+```{sh}
+BARCODEFILE="$BASEDIR/report/forAxe.txt"
+BARCODEFILEREVERSE="$BASEDIR/report/forAxeReverse.txt"
+BARCODEFILE_RUN7="$BASEDIR/report/forAxe_run7.txt"
+BARCODEFILEREVERSE_RUN7="$BASEDIR/report/forAxeReverse_run7.txt"
+
+cp $RAWDIR/*.gz $TEMPDIR/
+axe-demux -z 1 -m 1 -2 -c -b $BARCODEFILE -t $TEMPDIR/demultiplexStatsForwardRun10.txt -f $TEMPDIR/p1617-3492-01_S1_L001_R1_001.fastq.gz -F $TEMPDIR/demuRun10 -r $TEMPDIR/p1617-3492-01_S1_L001_R2_001.fastq.gz -R $TEMPDIR/demuRun10
+axe-demux -z 1 -m 1 -2 -c -b $BARCODEFILEREVERSE -t $TEMPDIR/demultiplexStatsReverseRun10.txt -f $TEMPDIR/demuRun10_unknown_R1.fastq.gz -F $TEMPDIR/demuRevRun10 -r $TEMPDIR/demuRun10_unknown_R2.fastq.gz -R $TEMPDIR/demuRevRun10
+
+#Processed 21.25M read pairs in 504.7 seconds (42.1K read pairs/sec)
+#7.64M read pairs contained valid barcodes
+#13.61M read pairs could not be demultiplexed (64.1%)
+#Processed 13.61M read pairs in 334.4 seconds (40.7K read pairs/sec)
+#7.92M read pairs contained valid barcodes
+#5.70M read pairs could not be demultiplexed (41.8%)
+
+axe-demux -z 1 -m 1 -2 -c -b $BARCODEFILE_RUN7 -t $TEMPDIR/demultiplexStatsForwardRun7a.txt -f $TEMPDIR/run7_1_S1_L001_R1_001.fastq.gz -F $TEMPDIR/demuRun7a -r $TEMPDIR/run7_1_S1_L001_R2_001.fastq.gz -R $TEMPDIR/demuRun7a
+axe-demux -z 1 -m 1 -2 -c -b $BARCODEFILEREVERSE_RUN7 -t $TEMPDIR/demultiplexStatsReverseRun7a.txt -f $TEMPDIR/demuRun7a_unknown_R1.fastq.gz -F $TEMPDIR/demuRevRun7a -r $TEMPDIR/demuRun7a_unknown_R2.fastq.gz -R $TEMPDIR/demuRevRun7a
+
+#Processed 9.79M read pairs in 216.0 seconds (45.3K read pairs/sec)
+#386.52K read pairs contained valid barcodes
+#9.40M read pairs could not be demultiplexed (96.1%)
+#Processed 9.40M read pairs in 206.2 seconds (45.6K read pairs/sec)
+#332.75K read pairs contained valid barcodes
+#9.07M read pairs could not be demultiplexed (96.5%)
+
+axe-demux -z 1 -m 1 -2 -c -b $BARCODEFILE_RUN7 -t $TEMPDIR/demultiplexStatsForwardRun7b.txt -f $TEMPDIR/run7_2_S1_L001_R1_001.fastq.gz -F $TEMPDIR/demuRun7b -r $TEMPDIR/run7_2_S1_L001_R2_001.fastq.gz -R $TEMPDIR/demuRun7b
+axe-demux -z 1 -m 1 -2 -c -b $BARCODEFILEREVERSE_RUN7 -t $TEMPDIR/demultiplexStatsReverseRun7b.txt -f $TEMPDIR/demuRun7b_unknown_R1.fastq.gz -F $TEMPDIR/demuRevRun7b -r $TEMPDIR/demuRun7b_unknown_R2.fastq.gz -R $TEMPDIR/demuRevRun7b
+
+#Processed 12.36M read pairs in 281.9 seconds (43.9K read pairs/sec)
+#535.79K read pairs contained valid barcodes
+#11.83M read pairs could not be demultiplexed (95.7%)
+#Processed 11.83M read pairs in 268.1 seconds (44.1K read pairs/sec)
+#437.98K read pairs contained valid barcodes
+#11.39M read pairs could not be demultiplexed (96.3%)
+
+## MERGE and REORDERING!!!
+for SAMPLE in ${ALLSAMPLES_16S[@]} ${ALLSAMPLES_ITS[@]}; do
+if [[ $SAMPLE == *Nod* ]]; then
+zcat $TEMPDIR/demuRun7a_${SAMPLE}_R1.fastq.gz $TEMPDIR/demuRevRun7a_${SAMPLE}_R2.fastq.gz $TEMPDIR/demuRun7b_${SAMPLE}_R1.fastq.gz $TEMPDIR/demuRevRun7b_${SAMPLE}_R2.fastq.gz | gzip > $TEMPDIR/${SAMPLE}_R1.fastq.gz 
+zcat $TEMPDIR/demuRun7a_${SAMPLE}_R2.fastq.gz $TEMPDIR/demuRevRun7a_${SAMPLE}_R1.fastq.gz $TEMPDIR/demuRun7b_${SAMPLE}_R2.fastq.gz $TEMPDIR/demuRevRun7b_${SAMPLE}_R1.fastq.gz | gzip > $TEMPDIR/${SAMPLE}_R2.fastq.gz 
+else 
+zcat $TEMPDIR/demuRun10_${SAMPLE}_R1.fastq.gz $TEMPDIR/demuRevRun10_${SAMPLE}_R2.fastq.gz | gzip > $TEMPDIR/${SAMPLE}_R1.fastq.gz 
+zcat $TEMPDIR/demuRun10_${SAMPLE}_R2.fastq.gz $TEMPDIR/demuRevRun10_${SAMPLE}_R1.fastq.gz | gzip > $TEMPDIR/${SAMPLE}_R2.fastq.gz 
+fi
+done
+
+mv $TEMPDIR/demultiplexStats* $RAWDIR/
+rm $TEMPDIR/demu*
+mkdir -p $RAWDIR/16S/
+mkdir -p $RAWDIR/ITS/
+mkdir -p $READS/16S/
+mkdir -p $READS/ITS/
+mkdir -p $RAWDIR/unknown16S/
+mkdir -p $RAWDIR/unknownITS/
+mkdir -p $RAWDIR/unused16S/
+mkdir -p $RAWDIR/unusedITS/
+mv $TEMPDIR/Sample16SUnknown*.fastq.gz $RAWDIR/unknown16S/
+mv $TEMPDIR/SampleITSUnknown*.fastq.gz $RAWDIR/unknownITS/
+mv $TEMPDIR/Sample16SEmpty*.fastq.gz $RAWDIR/unused16S/
+mv $TEMPDIR/Sample16SGrey*.fastq.gz $RAWDIR/unused16S/
+mv $TEMPDIR/Sample16SBrown*.fastq.gz $RAWDIR/unused16S/
+mv $TEMPDIR/Sample16SSample34mix* $RAWDIR/unused16S/
+mv $TEMPDIR/SampleITSSample34mix* $RAWDIR/unusedITS/
+mv $RAWDIR/16S/Sample16S34mix* $RAWDIR/unused16S/
+mv $RAWDIR/ITS/SampleITS34mix* $RAWDIR/unusedITS/
+mv $TEMPDIR/Sample16S*.fastq.gz $RAWDIR/16S/
+mv $TEMPDIR/SampleITS*.fastq.gz $RAWDIR/ITS/
+
+tail $RAWDIR/demultiplexStats*
+# without barcode: 5779914
+```
+
+## Check briefly the GDC results
+
+I have approximately five times the number of reads (should probaby be halved based on the numbers I saw while processing - counts both ends I think). He probably did not look on both ends for the barcodes.
+
+```{r}
+gdcCounts <- read.table("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_GDC/2_gdc_calcs/e_qf/run10_trimmed_and_qc_seq_counts.txt", sep = ":", header = FALSE, col.names = c("file", "nReads"))
+gdcCounts$file <- gsub("e_qf\\/run10_trim_|_good\\.fasta", "", gdcCounts$file)
+sum(gdcCounts$nReads) # 7'238'817
+# 16S: 2164 otus
+# ITS: 624 otus
+
+baseDir <- "/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/report"
+primers16S <- read.table(file.path(baseDir, "16S_primers.txt"), sep = '\t', header = TRUE, row.names = 1, stringsAsFactors = FALSE); rownames(primers16S) <- paste0("Sample16S", rownames(primers16S))
+primersITS <- read.table(file.path(baseDir, "ITS_primers.txt"), sep = '\t', header = TRUE, row.names = 1, stringsAsFactors = FALSE); rownames(primersITS) <- paste0("SampleITS", rownames(primersITS))
+primers16S$primarPaste <- paste0(primers16S$reverse, "_", primers16S$forward)
+primersITS$primarPaste <- paste0(primersITS$reverse, "_", primersITS$forward)
+primers16S$primarPaste[!(primers16S$primarPaste %in% gdcCounts$file)]
+primersITS$primarPaste[!(primersITS$primarPaste %in% gdcCounts$file)]
+
+cat(paste0(grep("ITS", gdcCounts$file[!(gdcCounts$file %in% primers16S$primarPaste)], invert = TRUE, value = TRUE), collapse = '\n')) # what about those?
+cat(paste0(grep("ITS", gdcCounts$file[!(gdcCounts$file %in% primersITS$primarPaste)], value = TRUE), collapse = '\n')) # what about those?
+
+mwsForward <- read.table("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_fastq/demultiplexStatsForward.txt", sep = '\t', header = TRUE, stringsAsFactors = FALSE)
+mwsReverse <- read.table("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_fastq/demultiplexStatsReverse.txt", sep = '\t', header = TRUE, stringsAsFactors = FALSE)
+sum(mwsForward$Count, mwsReverse$Count)/2 # 17'455'412
+```
+
+## Processing
+
+```{sh}
+sudo chmod +x $SCRIPTDIR/process_16S_V5_V6_V7.sh
+sudo chmod +x $SCRIPTDIR/process_ITS_1.sh
+
+$SCRIPTDIR/process_16S_V5_V6_V7.sh -t 14 $RAWDIR/16S $READS/16S $USEARCHOUT_16S $UTAXDIR $SCRIPTDIR $TEMPDIR &> $TEMPDIR/proc_16S.log
+mv $TEMPDIR/proc_16S.log $USEARCHOUT_16S/
+grep "\\[failed\\]" $USEARCHOUT_16S/proc_16S.log
+grep "\\[ok\\]" $USEARCHOUT_16S/proc_16S.log
+grep -A 1 "Read1 after filtering" $USEARCHOUT_16S/proc_16S.log | grep "total reads" | awk '{print $3}' | paste -sd+ | bc
+grep "% merged" $USEARCHOUT_16S/proc_16S.log | grep -v CPU | awk '{print $4}'
+grep "mapped to OTUs" $USEARCHOUT_16S/proc_16S.log
+grep -A 1 "reads in total" $USEARCHOUT_16S/proc_16S.log | grep "/"
+grep -A 4 -B 1 "Clusters" $USEARCHOUT_16S/proc_16S.log
+
+
+$SCRIPTDIR/process_ITS_1.sh -t 14 $RAWDIR/ITS $READS/ITS $USEARCHOUT_ITS $UTAXDIR $SCRIPTDIR $TEMPDIR &> $TEMPDIR/proc_ITS.log
+mv $TEMPDIR/proc_ITS.log $USEARCHOUT_ITS/
+grep "\\[failed\\]" $USEARCHOUT_ITS/proc_ITS.log
+grep "\\[ok\\]" $USEARCHOUT_ITS/proc_ITS.log
+grep -A 1 "Read1 after filtering" $USEARCHOUT_ITS/proc_ITS.log | grep "total reads" | awk '{print $3}' | paste -sd+ | bc
+grep "% merged" $USEARCHOUT_ITS/proc_ITS.log | grep -v CPU | awk '{print $4}'
+grep "mapped to OTUs" $USEARCHOUT_ITS/proc_ITS.log
+grep -A 1 "reads in total" $USEARCHOUT_ITS/proc_ITS.log | grep "/"
+grep -A 4 -B 1 "Clusters" $USEARCHOUT_ITS/proc_ITS.log
+```
+
+## FunGuild
+
+```{sh}
+# it works with the sintax output, just use only the first two columns
+echo -e "OTU\ttaxonomy" > tempForFunGuild.txt
+awk -F"\t" -v OFS="\t" '{print $1,$2}' $USEARCHOUT_ITS/otus_tax.txt >> tempForFunGuild.txt
+python3 $SCRIPTDIR/Guilds_v1.1.py -otu tempForFunGuild.txt -db fungi -m -u
+mv tempForFunGuild.guilds_matched.txt $USEARCHOUT_ITS/otus_funGuild_matched.txt
+mv tempForFunGuild.guilds_unmatched.txt $USEARCHOUT_ITS/otus_funGuild_unmatched.txt
+rm tempForFunGuild.txt
+awk -F"\t" -v OFS="\t" '{print $1,$2,$3,$4,$5,$6,$7,$8,$9}' $USEARCHOUT_ITS/otus_funGuild_matched.txt > $USEARCHOUT_ITS/otus_funGuild_matched_forR.txt
+#FUNGuild made assignments on 433 OTUs, these have been saved to tempForFunGuild.guilds_matched.txt.
+#275 OTUs were unassigned, these are saved to tempForFunGuild.guilds_unmatched.txt.
+```
+
+## PICRUSt2
+
+```{sh}
+export PATH=$HOME/miniconda2/bin:$PATH
+source activate picrust2
+
+TEMPDIR=$HOME/picrustTemp
+mkdir -p $TEMPDIR
+# with  --stratified it crashes (object too big for multiprocessing)
+awk '{gsub(",", "\t", $0); gsub("\"", "", $0); print $0}' $USEARCHOUT_16S/rOTUs.csv > $TEMPDIR/tempForPicrust.txt
+zcat $USEARCHOUT_16S/otus.fa.gz > $TEMPDIR/tempForPicrust.fa
+picrust2_pipeline.py -s $TEMPDIR/tempForPicrust.fa -i $TEMPDIR/tempForPicrust.txt -o $TEMPDIR/picrust_OTU -p 6
+rm -r $USEARCHOUT_16S/picrust_OTU
+mv $TEMPDIR/picrust_OTU $USEARCHOUT_16S/
+rm -r $HOME/picrustTemp
+
+source deactivate
+```
+
+# Update ITS data and remove confidently assigned plant OTUs
+
+```{sh}
+wget https://github.com/apallavicini/PLANiTS/raw/master/PLANiTS_29-03-2020.zip -O $TEMPDIR/PLANiTS_29-03-2020.zip
+unzip $TEMPDIR/PLANiTS_29-03-2020.zip -d $TEMPDIR
+zcat $USEARCHOUT_ITS/otus_good.fa.gz > $TEMPDIR/funSeqs.fasta
+
+sed -i 's/, / /g' $TEMPDIR/ITS1.SINTAX_format.fas
+zcat /media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_pesticides/GitIgnore_utaxdb/unite.forSintax.8.3.gz > $TEMPDIR/UNITE.8.3.fasta
+cat $TEMPDIR/ITS1.SINTAX_format.fas $TEMPDIR/UNITE.8.3.fasta > $TEMPDIR/plantAndFungiNew.fasta
+usearch -makeudb_sintax $TEMPDIR/plantAndFungiNew.fasta -output $TEMPDIR/plantAndFungiNew.udb
+usearch -sintax $TEMPDIR/funSeqs.fasta -db $TEMPDIR/plantAndFungiNew.udb -strand both -tabbedout $TEMPDIR/plantAndFungiNew.txt -sintax_cutoff 0.8
+cp $TEMPDIR/plantAndFungiNew.txt $USEARCHOUT_ITS/otus_tax.txt
+```
+
+# Normalize data
+
+```{sh}
+# rarefaction for the indices and permanova, but nothing for differential abundance
+Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied OTU none
+Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_16S ${RESDIR_16S}_semiRarefied OTU none
+# ITS: ===  2022 Mar 02 01:35:08 PM === Filter: Removed 135 OTUs; 532 OTUs remain.
+# ITS: ===  2022 Mar 02 01:35:08 PM === Filter after sample and OTU cleanup: Removed 44 ; 488 OTUs remain.
+# ITS:  ===  2022 Mar 02 01:35:08 PM === rarefied to 3387 reads!
+# ITS: Cummulative Proportion (rarefied, samples): 0.2056321 0.30256859, prop explained: 0.2056321 0.09693651
+# ITS: Cummulative Proportion (rarefied, averages): 0.2292513 0.32584363, prop explained: 0.2292513 0.09659233
+
+# 16S: ===  2021 Sep 15 13:30:30 === Filter: Removed 1395 OTUs; 4650 OTUs remain. 
+# 16S: ===  2021 Sep 15 13:30:30 === removed 4174 OTUs with too little coverage for Rhizobia identification 
+# 16S: ===  2021 Sep 15 13:30:30 === Filter after sample and OTU cleanup: Removed 323 OTUs; 4327 OTUs remain. 
+# 16S: ===  2021 Sep 15 13:30:31 === rarefied to 22485 reads! 
+# 16S: Cummulative Proportion (rarefied, samples): 0.1295854 0.18750948
+# 16S: Cummulative Proportion (rarefied, averages): 0.1854311 0.25515138
+0.18750948-0.1295854
+0.25515138-0.1854311
+
+Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied_noGlomeromycota OTU none --removeGlomeromycota
+Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_16S ${RESDIR_16S}_semiRarefied_noRhizobia OTU none --removeRhizobia
+# ITS: ===  2022 Mar 02 01:44:26 PM === Filter: Removed 135 OTUs; 532 OTUs remain.
+# ITS: ===  2022 Mar 02 01:44:26 PM === Filter after sample and OTU cleanup: Removed 37 OTUs; 361 OTUs remain. 
+# ITS: ===  2022 Mar 02 01:44:26 PM === rarefied to 1090 reads! 
+# ITS: Cummulative Proportion (rarefied, samples): 0.2276179 0.3366004, prop explained: 0.2276179 0.1089825
+# ITS: Cummulative Proportion (rarefied, averages): 0.1988815 0.2975952, prop explained: 0.1988815 0.0987137
+
+# 16S: ===  2021 Sep 15 13:51:37 === Filter: Removed 1395 OTUs; 4650 OTUs remain. 
+# 16S: ===  2021 Sep 15 13:51:37 === removed 4174 OTUs with too little coverage for Rhizobia identification 
+# 16S: ===  2021 Sep 15 13:51:37 === removing 62 OTUs. 
+# 16S: ===  2021 Sep 15 13:51:37 === Filter after sample and OTU cleanup: Removed 313 OTUs; 4275 OTUs remain. 
+# 16S: ===  2021 Sep 15 13:51:38 === rarefied to 10882 reads! 
+# 16S: Cummulative Proportion (rarefied, samples): 0.07994739 0.13725851
+# 16S: Cummulative Proportion (rarefied, averages): 0.1480488 0.21839364
+0.13725851-0.07994739
+0.21839364-0.1480488
+
+# "mark as primary symbionts":
+488-361 # 127 ITS
+#522-394 # 128 ITS (that0s old before plant seq removal)
+4327-4275 # 52 16S
+
+# both filters remove up to 70-80% of the reads in some samples
+
+Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied OTU none --manualTesting
+Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_16S ${RESDIR_16S}_semiRarefied OTU none --manualTesting
+```
+
+# Get UniFrac distances
+
+```{sh}
+MYSEQS="$TEMPDIR/selectedSeqs.fasta"
+export PATH=$HOME/miniconda2/bin:$PATH
+source activate qiime1
+
+python $SCRIPTDIR/extractOTUs.py "$USEARCHOUT_ITS/otus_good.fa.gz" "${RESDIR_ITS}_semiRarefied/OTU/selectedOTUsForUniFrac.txt" > $MYSEQS
+align_seqs.py -i $MYSEQS -o aligned -m muscle
+make_phylogeny.py -i aligned/selectedSeqs_aligned.fasta -o aligned.tre -t fasttree
+mv aligned.tre $RESDIR_ITS/OTU/
+rm -r $RESDIR_ITS/OTU/aligned
+mv aligned $RESDIR_ITS/OTU/
+
+python $SCRIPTDIR/extractOTUs.py "$USEARCHOUT_16S/otus.fa.gz" "$RESDIR_16S/OTU/selectedOTUsForUniFrac.txt" > $MYSEQS
+align_seqs.py -i $MYSEQS -o aligned -m muscle
+make_phylogeny.py -i aligned/selectedSeqs_aligned.fasta -o aligned.tre -t fasttree
+mv aligned.tre $RESDIR_16S/OTU/
+rm -r $RESDIR_16S/OTU/aligned
+mv aligned $RESDIR_16S/OTU/
+
+source deactivate
+```
+
+# Indices and PERMANOVAs
+
+```{sh}
+Rscript $SCRIPTDIR/final_summarizedDataTests.R ${RESDIR_ITS}_semiRarefied/OTU $RESDIR_ITS/OTU/aligned.tre
+Rscript $SCRIPTDIR/final_summarizedDataTests.R ${RESDIR_16S}_semiRarefied/OTU $RESDIR_16S/OTU/aligned.tre
+
+Rscript $SCRIPTDIR/final_summarizedDataTests.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU $RESDIR_ITS/OTU/aligned.tre
+Rscript $SCRIPTDIR/final_summarizedDataTests.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU $RESDIR_16S/OTU/aligned.tre
+```
+
+# Differential abundance
+
+```{sh}
+Rscript $SCRIPTDIR/final_differentialAbundance.R ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_differentialAbundance.R ${RESDIR_16S}_semiRarefied/OTU
+
+Rscript $SCRIPTDIR/final_differentialAbundance.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+Rscript $SCRIPTDIR/final_differentialAbundance.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
+```
+
+# Differential abundance plots
+
+```{sh}
+Rscript $SCRIPTDIR/final_differentialAbundancePlots.R ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_differentialAbundancePlots.R ${RESDIR_16S}_semiRarefied/OTU
+
+Rscript $SCRIPTDIR/final_differentialAbundancePlots.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+Rscript $SCRIPTDIR/final_differentialAbundancePlots.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
+```
+
+===  2020 Mai 07 11:16:34 === Rhizobia has 97 entries. 
+===  2020 Mai 07 11:16:34 === AMF has 101 entries. 
+===  2020 Mai 07 11:16:34 === RhizobiaWithinAMF has 58 entries. 
+===  2020 Mai 07 11:16:34 === AMFwithinNonRhizo has 60 entries. 
+===  2020 Mai 07 11:16:34 === bothVsNone has 91 entries. 
+===  2020 Mai 07 11:16:34 === pairwise contrasts have: 127
+
+===  2020 Mai 07 11:17:30 === Rhizobia has 724 entries. 
+===  2020 Mai 07 11:17:30 === AMF has 372 entries. 
+===  2020 Mai 07 11:17:30 === RhizobiaWithinAMF has 482 entries. 
+===  2020 Mai 07 11:17:30 === AMFwithinNonRhizo has 251 entries. 
+===  2020 Mai 07 11:17:31 === bothVsNone has 562 entries. 
+===  2020 Mai 07 11:17:31 === pairwise contrasts have: 889 
+
+# Stable OTUs enrichment and bar plots
+
+```{sh}
+Rscript $SCRIPTDIR/final_stableOTUs_enrichment.R ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_stableOTUs_enrichment.R ${RESDIR_16S}_semiRarefied/OTU
+
+Rscript $SCRIPTDIR/final_stableOTUs_enrichment.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+Rscript $SCRIPTDIR/final_stableOTUs_enrichment.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
+```
+
+===  2021 Jul 09 15:24:25 === found 189 stable OTUs. 
+===  2021 Jul 09 15:24:33 === found 1353 stable OTUs. 
+===  2021 Jul 09 15:24:39 === found 157 stable OTUs. 
+===  2021 Jul 09 15:24:47 === found 1390 stable OTUs.
+
+# Annotation enrichment and plots
+
+```{sh}
+Rscript $SCRIPTDIR/final_annotationPlots.R ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_annotationPlots.R ${RESDIR_16S}_semiRarefied/OTU
+
+Rscript $SCRIPTDIR/final_annotationPlots.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+Rscript $SCRIPTDIR/final_annotationPlots.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
+
+Rscript $SCRIPTDIR/final_funguildPlots.R $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_funguildPlots.R $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+```
+
+# Description for the plants species specific OTUs
+
+```{sh}
+Rscript $SCRIPTDIR/final_checkIndividualOTUs.R ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_checkIndividualOTUs.R ${RESDIR_16S}_semiRarefied/OTU
+
+Rscript $SCRIPTDIR/final_checkIndividualOTUs.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+Rscript $SCRIPTDIR/final_checkIndividualOTUs.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
+```
+
+# Some figures
+
+```{sh}
+Rscript $SCRIPTDIR/final_doFigures.R ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_doFigures.R ${RESDIR_16S}_semiRarefied/OTU
+
+Rscript $SCRIPTDIR/final_doFigures.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+Rscript $SCRIPTDIR/final_doFigures.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
+```
+
+# Ternary plot
+
+```{sh}
+Rscript $SCRIPTDIR/final_doTernaryPlot.R ${RESDIR_ITS}_semiRarefied/OTU
+Rscript $SCRIPTDIR/final_doTernaryPlot.R ${RESDIR_16S}_semiRarefied/OTU
+
+Rscript $SCRIPTDIR/final_doTernaryPlot.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
+Rscript $SCRIPTDIR/final_doTernaryPlot.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
+```
+
+# Tree with the core microbiome
+ 
+```{sh}
+export PATH=$HOME/miniconda2/bin:$PATH
+source activate qiime1
+
+fgrep -v "domain" -h ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_*_confidentAnnotation.csv | awk -F',' '{print $1}' > ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt
+fgrep -v "domain" -h ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_*_confidentAnnotation.csv | awk -F',' '{print $1}' > ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt
+wc -l ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_*_confidentAnnotation.csv
+wc -l ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt
+wc -l ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_*_confidentAnnotation.csv
+wc -l ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt
+
+MYSEQS="$TEMPDIR/coreMicrobiomeAllOtus.fasta"
+rm -r aligned
+python $SCRIPTDIR/extractOTUs.py "$USEARCHOUT_ITS/otus_good.fa.gz" "${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt" > $MYSEQS
+align_seqs.py -i $MYSEQS -o aligned -m muscle
+#align_seqs.py -i $MYSEQS -o aligned
+make_phylogeny.py -i aligned/coreMicrobiomeAllOtus_aligned.fasta -o coreMicrobiomeAllOtus_aligned.tre -t fasttree
+mv aligned/coreMicrobiomeAllOtus_aligned.fasta ${RESDIR_ITS}_semiRarefied/OTU/
+mv coreMicrobiomeAllOtus_aligned.tre ${RESDIR_ITS}_semiRarefied/OTU/
+
+rm -r aligned
+python $SCRIPTDIR/extractOTUs.py "$USEARCHOUT_16S/otus.fa.gz" "${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt" > $MYSEQS
+align_seqs.py -i $MYSEQS -o aligned -m muscle
+#align_seqs.py -i $MYSEQS -o aligned
+make_phylogeny.py -i aligned/coreMicrobiomeAllOtus_aligned.fasta -o coreMicrobiomeAllOtus_aligned.tre -t fasttree
+mv aligned/coreMicrobiomeAllOtus_aligned.fasta ${RESDIR_16S}_semiRarefied/OTU/
+mv coreMicrobiomeAllOtus_aligned.tre ${RESDIR_16S}_semiRarefied/OTU/
+
+# try with silva reference
+wget https://www.arb-silva.de/fileadmin/silva_databases/qiime/Silva_132_release.zip -O $TEMPDIR/Silva_132_release.zip
+unzip $TEMPDIR/Silva_132_release.zip
+
+rm -r alignedRef
+python $SCRIPTDIR/extractOTUs.py "$USEARCHOUT_ITS/otus_good.fa.gz" "${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt" > $MYSEQS
+align_seqs.py -i $MYSEQS -o alignedRef -p 50 -t $HOME/SILVA_132_QIIME_release/core_alignment/80_core_alignment.fna
+make_phylogeny.py -i alignedRef/coreMicrobiomeAllOtus_aligned.fasta -o coreMicrobiomeAllOtus_aligned.tre -t fasttree
+mv alignedRef/coreMicrobiomeAllOtus_aligned.fasta ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef.fasta
+mv coreMicrobiomeAllOtus_aligned.tre ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef.tre
+
+rm -r alignedRef
+python $SCRIPTDIR/extractOTUs.py "$USEARCHOUT_16S/otus.fa.gz" "${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus.txt" > $MYSEQS
+align_seqs.py -i $MYSEQS -o alignedRef -p 50 -t $HOME/SILVA_132_QIIME_release/core_alignment/80_core_alignment.fna
+make_phylogeny.py -i alignedRef/coreMicrobiomeAllOtus_aligned.fasta -o coreMicrobiomeAllOtus_aligned.tre -t fasttree
+mv alignedRef/coreMicrobiomeAllOtus_aligned.fasta ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef.fasta
+mv coreMicrobiomeAllOtus_aligned.tre ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef.tre
+
+source deactivate
+
+source activate gotree
+gotree reroot midpoint -i ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_aligned.tre -o ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_aligned_rooted.tre
+gotree reroot midpoint -i ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_aligned.tre -o ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_aligned_rooted.tre
+gotree reroot midpoint -i ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef.tre -o ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef_rooted.tre
+gotree reroot midpoint -i ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef.tre -o ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef_rooted.tre
+source deactivate
+
+echo -e "TREE_COLORS\nSEPARATOR COMMA\nDATA" > ${RESDIR_ITS}_semiRarefied/OTU/itolColoring.txt
+awk -F',' '{if (NR>1) {print $1",range,#68AED4,nn"}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_nn_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolColoring.txt
+awk -F',' '{if (NR>1) {print $1",range,#73C275,An"}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_An_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolColoring.txt
+awk -F',' '{if (NR>1) {print $1",range,#FD8C3A,AR"}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_AR_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolColoring.txt
+echo -e "TREE_COLORS\nSEPARATOR COMMA\nDATA" > ${RESDIR_16S}_semiRarefied/OTU/itolColoring.txt
+awk -F',' '{if (NR>1) {print $1",range,#68AED4,nn"}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_nn_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolColoring.txt
+awk -F',' '{if (NR>1) {print $1",range,#73C275,An"}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_An_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolColoring.txt
+awk -F',' '{if (NR>1) {print $1",range,#FD8C3A,AR"}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_AR_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolColoring.txt
+
+echo -e  "LABELS\nSEPARATOR COMMA\nDATA" > ${RESDIR_ITS}_semiRarefied/OTU/itolLabels.txt
+awk -F',' '{if (NR>1) {print $1","$3}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_nn_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolLabels.txt
+awk -F',' '{if (NR>1) {print $1","$3}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_An_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolLabels.txt
+awk -F',' '{if (NR>1) {print $1","$3}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_AR_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolLabels.txt
+echo -e  "LABELS\nSEPARATOR COMMA\nDATA" > ${RESDIR_16S}_semiRarefied/OTU/itolLabels.txt
+awk -F',' '{if (NR>1) {print $1","$3}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_nn_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolLabels.txt
+awk -F',' '{if (NR>1) {print $1","$3}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_An_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolLabels.txt
+awk -F',' '{if (NR>1) {print $1","$3}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_AR_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolLabels.txt
+
+echo -e  "LABELS\nSEPARATOR COMMA\nDATA" > ${RESDIR_ITS}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+awk -F',' '{if (NR>1) {print $1","$4}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_nn_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+awk -F',' '{if (NR>1) {print $1","$4}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_An_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+awk -F',' '{if (NR>1) {print $1","$4}}' ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_AR_confidentAnnotation.csv >> ${RESDIR_ITS}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+echo -e  "LABELS\nSEPARATOR COMMA\nDATA" > ${RESDIR_16S}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+awk -F',' '{if (NR>1) {print $1","$4}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_nn_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+awk -F',' '{if (NR>1) {print $1","$4}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_An_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+awk -F',' '{if (NR>1) {print $1","$4}}' ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiome_AR_confidentAnnotation.csv >> ${RESDIR_16S}_semiRarefied/OTU/itolLabelsLowerLevel.txt
+
+mkdir -p $HOME/Downloads/forKylePhyloTrees
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_aligned_rooted.tre $HOME/Downloads/forKylePhyloTrees/ITS_ssOTU_midpointRooted.tree
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef_rooted.tre $HOME/Downloads/forKylePhyloTrees/ITS_ssOTU_midpointRooted_refAlign.tree
+cp ${RESDIR_ITS}_semiRarefied/OTU/itolColoring.txt $HOME/Downloads/forKylePhyloTrees/ITS_itolColoring.txt
+cp ${RESDIR_ITS}_semiRarefied/OTU/itolLabels.txt $HOME/Downloads/forKylePhyloTrees/ITS_itolLabels.txt
+cp ${RESDIR_ITS}_semiRarefied/OTU/itolLabelsLowerLevel.txt $HOME/Downloads/forKylePhyloTrees/ITS_itolLabelsLowerLevel.txt
+cp ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_aligned_rooted.tre $HOME/Downloads/forKylePhyloTrees/16S_ssOTU_midpointRooted.tree
+cp ${RESDIR_16S}_semiRarefied/OTU/coreMicrobiomeAllOtus_alignedRef_rooted.tre $HOME/Downloads/forKylePhyloTrees/16S_ssOTU_midpointRooted_refAlign.tree
+cp ${RESDIR_16S}_semiRarefied/OTU/itolColoring.txt $HOME/Downloads/forKylePhyloTrees/16S_itolColoring.txt
+cp ${RESDIR_16S}_semiRarefied/OTU/itolLabels.txt $HOME/Downloads/forKylePhyloTrees/16S_itolLabels.txt
+cp ${RESDIR_16S}_semiRarefied/OTU/itolLabelsLowerLevel.txt $HOME/Downloads/forKylePhyloTrees/16S_itolLabelsLowerLevel.txt
+```
+ 
+# Check percent removed by species
+
+```{r}
+sampleTab16S <- read.table(file.path("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres", "report", "16S_design_botG.txt"), header = TRUE, stringsAsFactors = FALSE, row.names = 1, sep = '\t')
+sampleTabITS <- read.table(file.path("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres", "report", "ITS_design_botG.txt"), header = TRUE, stringsAsFactors = FALSE, row.names = 1, sep = '\t')
+rDir16S <- "/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_results_16S_semiRarefied_noRhizobia/OTU"
+myData16S <- read.csv(file.path(rDir16S, "percentOTUreadsRemoved.csv"), head = TRUE, stringsAsFactors = FALSE)
+rDirITS <- "/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_results_ITS_semiRarefied_noGlomeromycota/OTU"
+myDataITS <- read.csv(file.path(rDirITS, "percentOTUreadsRemoved.csv"), head = TRUE, stringsAsFactors = FALSE)
+myData16S$species <- sampleTab16S[myData16S$sampleName, "Species_name"]
+myDataITS$species <- sampleTabITS[myDataITS$sampleName, "Species_name"]
+removedPerSpecies16S <- aggregate(myData16S$percentRemoved, by = list(species = myData16S$species), mean)
+removedPerSpeciesITS <- aggregate(myDataITS$percentRemoved, by = list(species = myDataITS$species), mean)
+out <- cbind(removedPerSpecies16S, removedPerSpeciesITS$x)
+colnames(out) <- c("species", "removedReadsPercent_16S", "removedReadsPercent_ITS")
+write.csv(out, file.path("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres", "report", "removedPrimarySymbiontsBySpecies.csv"), row.names = FALSE, quote = FALSE)
+```
+
+
+```{sh}
+wc -l ${RESDIR_16S}_semiRarefied/OTU/mainContrastsSigOtus.txt
+wc -l ${RESDIR_ITS}_semiRarefied/OTU/mainContrastsSigOtus.txt
+cat ${RESDIR_16S}_semiRarefied/OTU/mainContrastsSigOtus.txt ${RESDIR_16S}_semiRarefied/OTU/symbionts.txt | sort | uniq -d | wc -l
+cat ${RESDIR_ITS}_semiRarefied/OTU/mainContrastsSigOtus.txt ${RESDIR_ITS}_semiRarefied/OTU/symbionts.txt | sort | uniq -d | wc -l
+```
+
+ITS
+tot: 39, old: 51
+nn: 15, old: 22
+An: 14, old: 16
+AR: 8, old: 13
+
+50*(15/37)
+50*(14/37)
+50*(8/37)
+
+# Update with plant removal
+
+```{sh}
+COLLECT="$HOME/Downloads/forKylePlantRemovalUpdate"
+mkdir -p $COLLECT
+
+# Figures
+cp $BASEDIR/report/figures/Fig_3_indices_less_nonTransformed_noLupin.png $COLLECT/Fig02B_indices.png
+cp $BASEDIR/report/figures/Fig_3_indices_less_nonTransformed_noLupin.svg $COLLECT/Fig02B_indices.svg
+cp $BASEDIR/report/figures/Fig_2_allCAPs_numbers.png $COLLECT/Fig03A_averageCAPs.png
+cp $BASEDIR/report/figures/Fig_2_allCAPs_numbers.svg $COLLECT/Fig03A_averageCAPs.svg
+cp $BASEDIR/report/figures/Fig_4_diffAbundance_part.png $COLLECT/Fig03B_diffAbundance.png
+cp $BASEDIR/report/figures/Fig_4_diffAbundance_part.svg $COLLECT/Fig03B_diffAbundance.svg
+cp $BASEDIR/report/figures/SI_indices_species_nonTransformed_withLupin.png $COLLECT/SI_Fig04_withPrimarySymbionts_indicesDetails.png
+cp $BASEDIR/report/figures/SI_indices_species_nonTransformed_withLupin.svg $COLLECT/SI_Fig04_withPrimarySymbionts_indicesDetails.svg
+cp $BASEDIR/report/figures/SI_indices_withoutPrimarySymbionts_nonTransformed.png $COLLECT/SI_Fig05_withoutPrimarySymbionts_indicesAll.png
+cp $BASEDIR/report/figures/SI_indices_withoutPrimarySymbionts_nonTransformed.svg $COLLECT/SI_Fig05_withoutPrimarySymbionts_indicesAll.svg
+cp $BASEDIR/report/figures/SI_allCAPs_singleSamples.png $COLLECT/SI_Fig06_sampleWiseCAPs.png
+cp $BASEDIR/report/figures/SI_allCAPs_singleSamples.svg $COLLECT/SI_Fig06_sampleWiseCAPs.svg
+cp $BASEDIR/report/figures/primarySymbionts.png $COLLECT/SI_Fig02_percPrimarySymbionts.png
+cp $BASEDIR/report/figures/primarySymbionts.svg $COLLECT/SI_Fig02_percPrimarySymbionts.svg
+
+
+# counts
+cp ${RESDIR_ITS}_semiRarefied/OTU/seqDat.csv $COLLECT/countTables_withSymbionts_raw.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/seqDatRarefied.csv $COLLECT/countTables_withSymbionts_rarefied.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/normData.csv $COLLECT/countTables_withSymbionts_normalized.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/seqDat.csv $COLLECT/countTables_withoutSymbionts_raw.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/seqDatRarefied.csv $COLLECT/countTables_withoutSymbionts_rarefied.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/normData.csv $COLLECT/countTables_withoutSymbionts_normalized.csv
+
+# main tables
+cp ${RESDIR_ITS}_semiRarefied/OTU/adonis_models.xlsx $COLLECT/Table01_adonis_models.xlsx
+cp ${RESDIR_ITS}_semiRarefied/OTU/enrichment/summary_onlySignificant_FDR.csv $COLLECT/Table02_summary_onlySignificant_FDR.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_tax_class_nn_enrichmentAny.csv $COLLECT/Table02_nn_update.csv
+
+# SI tables
+cp $BASEDIR/report/removedPrimarySymbiontsBySpecies.csv $COLLECT/SI_Table02_removedPrimarySymbiontsBySpecies.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/taxModOnlyConfident.csv $COLLECT/SI_Table03_withPrimSymb_taxModOnlyConfident.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/taxModAll.csv $COLLECT/SI_Table03_withPrimSymb_taxModAll.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/taxModOnlyConfident.csv $COLLECT/SI_Table03_withoutPrimSymb_taxModOnlyConfident.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/taxModAll.csv $COLLECT/SI_Table03_withoutPrimSymb_taxModAll.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/percSymb_models.xlsx $COLLECT/SI_Table04_percSymbModels.xlsx
+cp ${RESDIR_ITS}_semiRarefied/OTU/biodiv_models.xlsx $COLLECT/SI_Table05_biodiv_models.xlsx
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/biodiv_models.xlsx $COLLECT/SI_Table06_biodiv_models.xlsx
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/adonis_models.xlsx $COLLECT/SI_Table07_adonis_models.xlsx
+cp ${RESDIR_ITS}_semiRarefied/OTU/adonis_models.xlsx $COLLECT/SI_Table08_adonis_models.xlsx
+head -n 6 ${RESDIR_ITS}_semiRarefied/OTU/numSigOtus.csv > $COLLECT/SI_Table09_numSigOtus.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_An_confidentAnnotation.csv $COLLECT/SI_Table11_An_confidentAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_AR_confidentAnnotation.csv $COLLECT/SI_Table11_AR_confidentAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_nn_confidentAnnotation.csv $COLLECT/SI_Table11_nn_confidentAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_An_entireAnnotation.csv $COLLECT/SI_Table11_An_entireAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_AR_entireAnnotation.csv $COLLECT/SI_Table11_AR_entireAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied/OTU/coreMicrobiome_nn_entireAnnotation.csv $COLLECT/SI_Table11_nn_entireAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/coreMicrobiome_An_confidentAnnotation.csv $COLLECT/SI_Table12_An_confidentAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/coreMicrobiome_AR_confidentAnnotation.csv $COLLECT/SI_Table12_AR_confidentAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/coreMicrobiome_nn_confidentAnnotation.csv $COLLECT/SI_Table12_nn_confidentAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/coreMicrobiome_An_entireAnnotation.csv $COLLECT/SI_Table12_An_entireAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/coreMicrobiome_AR_entireAnnotation.csv $COLLECT/SI_Table12_AR_entireAnnotation.csv
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/coreMicrobiome_nn_entireAnnotation.csv $COLLECT/SI_Table12_nn_entireAnnotation.csv
+
+# SI Tab10 check if there's a significant enrichment now, no
+for CURFILE in ${RESDIR_ITS}_semiRarefied/OTU/stableOTUs_tax_*_enrichment.csv ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/stableOTUs_tax_*_enrichment.csv; do
+awk -F',' '{if (NR>1) {if ($5<0.05) {print $0}}}' $CURFILE
+done
+
+
+cp ${RESDIR_ITS}_semiRarefied/OTU/mainContrastsSigOtus.txt $COLLECT/ITS_withPrimSymb_mainContrastsSigOtus.txt
+cp ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU/mainContrastsSigOtus.txt $COLLECT/ITS_withoutPrimSymb_mainContrastsSigOtus.txt
+wc -l $COLLECT/ITS_withPrimSymb_mainContrastsSigOtus.txt
+wc -l $COLLECT/ITS_withoutPrimSymb_mainContrastsSigOtus.txt
+# 132/83
+```
+
+
+
+
+
+
+**Update:**
+
+* rarefied to 3387 reads instead of 5749 (with symb) and 1090 instead of 2816 (without symb)
+* 127 instead of 128 primary symbionts
+* 37 instead of 51 SS-OTUs
+* no changes on indices significances
+
+
+
+
+
