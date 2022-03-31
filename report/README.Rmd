@@ -1,19 +1,3 @@
----
-title: "Marcel van der Heijden, botanical garden experiment"
-author: "Marc W Schmid"
-date: "21st of Mai 2019"
-bibliography: reportReferences.bib
-output:
-  html_document:
-    toc: true # table of content true
-    depth: 3  # upto three depths of headings (specified by #, ## and ###)
-    number_sections: true  ## if you want number sections at each table header
-    theme: united # HTML theme
-    highlight: kate  # specifies the syntax highlighting style
----
-
-[see this for indicator species analysis](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0148824)
-
 # Dependencies
 
 ## Bash/Exec
@@ -49,7 +33,7 @@ ALLSAMPLES_ITS=($(<"$ALLSAMPLESFILE_ITS"))
 
 ## Extract the primers
 
-Quite some manual work. 171030_PCR_primers.xlsx. All barcodes are unique. For ITS it's the same as for Florian, ITS1. For 16S it's V5-V7: _In this study, the primer pair 799F-1391R, which amplifies the V5-V7 hypervariable regions of the 16S rDNA gene, displayed very low amplification of non-target DNA across all sampled plant compartments. And retrieved the highest number of OTUs as well as exhibited the highest Inverse Simpson diversity, especially in the plant compartments with high chloroplast content (stem and leaf samples). Therefore, we propose primer pair 799F-1391R as best suited for 16S rDNA metabarcoding studies which simultaneously investigate rhizosphere and endosphere microbiomes. _ [Beckers et al. 2016](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4865482/)
+Quite some manual work. 171030_PCR_primers.xlsx. All barcodes are unique.
 
 ```{r}
 baseDir <- "/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/report"
@@ -160,33 +144,6 @@ tail $RAWDIR/demultiplexStats*
 # without barcode: 5779914
 ```
 
-## Check briefly the GDC results
-
-I have approximately five times the number of reads (should probaby be halved based on the numbers I saw while processing - counts both ends I think). He probably did not look on both ends for the barcodes.
-
-```{r}
-gdcCounts <- read.table("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_GDC/2_gdc_calcs/e_qf/run10_trimmed_and_qc_seq_counts.txt", sep = ":", header = FALSE, col.names = c("file", "nReads"))
-gdcCounts$file <- gsub("e_qf\\/run10_trim_|_good\\.fasta", "", gdcCounts$file)
-sum(gdcCounts$nReads) # 7'238'817
-# 16S: 2164 otus
-# ITS: 624 otus
-
-baseDir <- "/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/report"
-primers16S <- read.table(file.path(baseDir, "16S_primers.txt"), sep = '\t', header = TRUE, row.names = 1, stringsAsFactors = FALSE); rownames(primers16S) <- paste0("Sample16S", rownames(primers16S))
-primersITS <- read.table(file.path(baseDir, "ITS_primers.txt"), sep = '\t', header = TRUE, row.names = 1, stringsAsFactors = FALSE); rownames(primersITS) <- paste0("SampleITS", rownames(primersITS))
-primers16S$primarPaste <- paste0(primers16S$reverse, "_", primers16S$forward)
-primersITS$primarPaste <- paste0(primersITS$reverse, "_", primersITS$forward)
-primers16S$primarPaste[!(primers16S$primarPaste %in% gdcCounts$file)]
-primersITS$primarPaste[!(primersITS$primarPaste %in% gdcCounts$file)]
-
-cat(paste0(grep("ITS", gdcCounts$file[!(gdcCounts$file %in% primers16S$primarPaste)], invert = TRUE, value = TRUE), collapse = '\n')) # what about those?
-cat(paste0(grep("ITS", gdcCounts$file[!(gdcCounts$file %in% primersITS$primarPaste)], value = TRUE), collapse = '\n')) # what about those?
-
-mwsForward <- read.table("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_fastq/demultiplexStatsForward.txt", sep = '\t', header = TRUE, stringsAsFactors = FALSE)
-mwsReverse <- read.table("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres/GitIgnore_fastq/demultiplexStatsReverse.txt", sep = '\t', header = TRUE, stringsAsFactors = FALSE)
-sum(mwsForward$Count, mwsReverse$Count)/2 # 17'455'412
-```
-
 ## Processing
 
 ```{sh}
@@ -270,45 +227,9 @@ cp $TEMPDIR/plantAndFungiNew.txt $USEARCHOUT_ITS/otus_tax.txt
 # rarefaction for the indices and permanova, but nothing for differential abundance
 Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied OTU none
 Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_16S ${RESDIR_16S}_semiRarefied OTU none
-# ITS: ===  2022 Mar 02 01:35:08 PM === Filter: Removed 135 OTUs; 532 OTUs remain.
-# ITS: ===  2022 Mar 02 01:35:08 PM === Filter after sample and OTU cleanup: Removed 44 ; 488 OTUs remain.
-# ITS:  ===  2022 Mar 02 01:35:08 PM === rarefied to 3387 reads!
-# ITS: Cummulative Proportion (rarefied, samples): 0.2056321 0.30256859, prop explained: 0.2056321 0.09693651
-# ITS: Cummulative Proportion (rarefied, averages): 0.2292513 0.32584363, prop explained: 0.2292513 0.09659233
-
-# 16S: ===  2021 Sep 15 13:30:30 === Filter: Removed 1395 OTUs; 4650 OTUs remain. 
-# 16S: ===  2021 Sep 15 13:30:30 === removed 4174 OTUs with too little coverage for Rhizobia identification 
-# 16S: ===  2021 Sep 15 13:30:30 === Filter after sample and OTU cleanup: Removed 323 OTUs; 4327 OTUs remain. 
-# 16S: ===  2021 Sep 15 13:30:31 === rarefied to 22485 reads! 
-# 16S: Cummulative Proportion (rarefied, samples): 0.1295854 0.18750948
-# 16S: Cummulative Proportion (rarefied, averages): 0.1854311 0.25515138
-0.18750948-0.1295854
-0.25515138-0.1854311
 
 Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied_noGlomeromycota OTU none --removeGlomeromycota
 Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_16S ${RESDIR_16S}_semiRarefied_noRhizobia OTU none --removeRhizobia
-# ITS: ===  2022 Mar 02 01:44:26 PM === Filter: Removed 135 OTUs; 532 OTUs remain.
-# ITS: ===  2022 Mar 02 01:44:26 PM === Filter after sample and OTU cleanup: Removed 37 OTUs; 361 OTUs remain. 
-# ITS: ===  2022 Mar 02 01:44:26 PM === rarefied to 1090 reads! 
-# ITS: Cummulative Proportion (rarefied, samples): 0.2276179 0.3366004, prop explained: 0.2276179 0.1089825
-# ITS: Cummulative Proportion (rarefied, averages): 0.1988815 0.2975952, prop explained: 0.1988815 0.0987137
-
-# 16S: ===  2021 Sep 15 13:51:37 === Filter: Removed 1395 OTUs; 4650 OTUs remain. 
-# 16S: ===  2021 Sep 15 13:51:37 === removed 4174 OTUs with too little coverage for Rhizobia identification 
-# 16S: ===  2021 Sep 15 13:51:37 === removing 62 OTUs. 
-# 16S: ===  2021 Sep 15 13:51:37 === Filter after sample and OTU cleanup: Removed 313 OTUs; 4275 OTUs remain. 
-# 16S: ===  2021 Sep 15 13:51:38 === rarefied to 10882 reads! 
-# 16S: Cummulative Proportion (rarefied, samples): 0.07994739 0.13725851
-# 16S: Cummulative Proportion (rarefied, averages): 0.1480488 0.21839364
-0.13725851-0.07994739
-0.21839364-0.1480488
-
-# "mark as primary symbionts":
-488-361 # 127 ITS
-#522-394 # 128 ITS (that0s old before plant seq removal)
-4327-4275 # 52 16S
-
-# both filters remove up to 70-80% of the reads in some samples
 
 Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_ITS ${RESDIR_ITS}_semiRarefied OTU none --manualTesting
 Rscript $SCRIPTDIR/final_normalizeData.R $BASEDIR $USEARCHOUT_16S ${RESDIR_16S}_semiRarefied OTU none --manualTesting
@@ -367,21 +288,6 @@ Rscript $SCRIPTDIR/final_differentialAbundancePlots.R ${RESDIR_16S}_semiRarefied
 Rscript $SCRIPTDIR/final_differentialAbundancePlots.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
 Rscript $SCRIPTDIR/final_differentialAbundancePlots.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
 ```
-
-===  2020 Mai 07 11:16:34 === Rhizobia has 97 entries. 
-===  2020 Mai 07 11:16:34 === AMF has 101 entries. 
-===  2020 Mai 07 11:16:34 === RhizobiaWithinAMF has 58 entries. 
-===  2020 Mai 07 11:16:34 === AMFwithinNonRhizo has 60 entries. 
-===  2020 Mai 07 11:16:34 === bothVsNone has 91 entries. 
-===  2020 Mai 07 11:16:34 === pairwise contrasts have: 127
-
-===  2020 Mai 07 11:17:30 === Rhizobia has 724 entries. 
-===  2020 Mai 07 11:17:30 === AMF has 372 entries. 
-===  2020 Mai 07 11:17:30 === RhizobiaWithinAMF has 482 entries. 
-===  2020 Mai 07 11:17:30 === AMFwithinNonRhizo has 251 entries. 
-===  2020 Mai 07 11:17:31 === bothVsNone has 562 entries. 
-===  2020 Mai 07 11:17:31 === pairwise contrasts have: 889 
-
 # Stable OTUs enrichment and bar plots
 
 ```{sh}
@@ -391,11 +297,6 @@ Rscript $SCRIPTDIR/final_stableOTUs_enrichment.R ${RESDIR_16S}_semiRarefied/OTU
 Rscript $SCRIPTDIR/final_stableOTUs_enrichment.R ${RESDIR_ITS}_semiRarefied_noGlomeromycota/OTU
 Rscript $SCRIPTDIR/final_stableOTUs_enrichment.R ${RESDIR_16S}_semiRarefied_noRhizobia/OTU
 ```
-
-===  2021 Jul 09 15:24:25 === found 189 stable OTUs. 
-===  2021 Jul 09 15:24:33 === found 1353 stable OTUs. 
-===  2021 Jul 09 15:24:39 === found 157 stable OTUs. 
-===  2021 Jul 09 15:24:47 === found 1390 stable OTUs.
 
 # Annotation enrichment and plots
 
@@ -555,24 +456,6 @@ colnames(out) <- c("species", "removedReadsPercent_16S", "removedReadsPercent_IT
 write.csv(out, file.path("/media/mwschmid/myData/MWSchmid/MarcelVanDerHeijden_rhizospheres", "report", "removedPrimarySymbiontsBySpecies.csv"), row.names = FALSE, quote = FALSE)
 ```
 
-
-```{sh}
-wc -l ${RESDIR_16S}_semiRarefied/OTU/mainContrastsSigOtus.txt
-wc -l ${RESDIR_ITS}_semiRarefied/OTU/mainContrastsSigOtus.txt
-cat ${RESDIR_16S}_semiRarefied/OTU/mainContrastsSigOtus.txt ${RESDIR_16S}_semiRarefied/OTU/symbionts.txt | sort | uniq -d | wc -l
-cat ${RESDIR_ITS}_semiRarefied/OTU/mainContrastsSigOtus.txt ${RESDIR_ITS}_semiRarefied/OTU/symbionts.txt | sort | uniq -d | wc -l
-```
-
-ITS
-tot: 39, old: 51
-nn: 15, old: 22
-An: 14, old: 16
-AR: 8, old: 13
-
-50*(15/37)
-50*(14/37)
-50*(8/37)
-
 # Update with plant removal
 
 ```{sh}
@@ -646,18 +529,6 @@ wc -l $COLLECT/ITS_withPrimSymb_mainContrastsSigOtus.txt
 wc -l $COLLECT/ITS_withoutPrimSymb_mainContrastsSigOtus.txt
 # 132/83
 ```
-
-
-
-
-
-
-**Update:**
-
-* rarefied to 3387 reads instead of 5749 (with symb) and 1090 instead of 2816 (without symb)
-* 127 instead of 128 primary symbionts
-* 37 instead of 51 SS-OTUs
-* no changes on indices significances
 
 
 
